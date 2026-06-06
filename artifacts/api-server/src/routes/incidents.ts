@@ -276,7 +276,8 @@ router.get("/search", (req, res) => {
   }
 
   const { q } = parsed.data;
-  const query = q.toLowerCase();
+  const query = q.trim().toLowerCase();
+  const matchAll = query === "";
   const results: unknown[] = [];
 
   if (!existsSync(CASES_DIR)) {
@@ -291,7 +292,7 @@ router.get("/search", (req, res) => {
       if (!file.endsWith(".md")) continue;
       const fullPath = join(fullPlatformDir, file);
       const content = readFileSync(fullPath, "utf8");
-      if (content.toLowerCase().includes(query)) {
+      if (matchAll || content.toLowerCase().includes(query)) {
         const inc = parseMarkdown(content, `cases/${platformDir}/${file}`);
         const lines = content.split("\n");
         const matchLine = lines.find((l) => l.toLowerCase().includes(query)) ?? "";
