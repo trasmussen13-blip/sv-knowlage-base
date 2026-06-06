@@ -71,38 +71,68 @@ function buildMarkdown(id: string, data: Record<string, unknown>): string {
 }
 
 /**
- * Shared env for all git operations — disables any interactive credential prompts
- * so git never hangs waiting for stdin.
+ * Base env for git — disables interactive credential prompts.
+ * The token is injected at call-time via GIT_CONFIG_* env vars (not embedded in URLs)
+ * so it never appears in remote URLs that could leak into error messages.
  */
-const GIT_ENV = {
+const GIT_ENV_BASE = {
   ...process.env,
   GIT_TERMINAL_PROMPT: "0",
   GIT_ASKPASS: "echo",
 } as NodeJS.ProcessEnv;
 
-function git(args: string[], opts?: { timeout?: number }): void {
+/**
+ * Build a git env that injects credentials via git's http.extraHeader config.
+ * This is the GitHub-recommended approach: the token never appears in any URL,
+ * so raw git error output cannot leak it.
+ */
+function buildGitEnv(token: string): NodeJS.ProcessEnv {
+  const b64 = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return {
+    ...GIT_ENV_BASE,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${b64}`,
+  } as NodeJS.ProcessEnv;
+}
+
+/**
+ * Redact any token-like strings and credential URLs from a git error message
+ * before it is returned to the API caller.
+ */
+function redactGitError(raw: string): string {
+  return raw
+    // Remove https://<token>@host patterns
+    .replace(/https:\/\/[A-Za-z0-9_\-.:]+@[^\s'"]*/g, "https://<redacted>@<host>")
+    // Remove standalone hex/base64 tokens that look like PATs (40+ chars)
+    .replace(/\b[A-Za-z0-9_\-]{40,}\b/g, "<redacted>")
+    // Keep only the first 300 chars so callers get useful context without full stderr
+    .slice(0, 300);
+}
+
+function git(args: string[], opts?: { timeout?: number; env?: NodeJS.ProcessEnv }): void {
   execFileSync("git", args, {
     stdio: "pipe",
-    env: GIT_ENV,
+    env: opts?.env ?? GIT_ENV_BASE,
     timeout: opts?.timeout ?? 10_000,
   });
 }
 
 function configureGit(): void {
   try {
-    const token = process.env.GITHUB_TOKEN;
-    const repoUrl = process.env.GITHUB_REPO_URL;
-    if (!token || !repoUrl) return;
-
+    // These use no credentials — safe to run with base env
     git(["config", "user.email", "incident-capture@simonsvoss.local"]);
     git(["config", "user.name", "Incident Capture Bot"]);
 
-    // Embed token in remote URL so git uses it without prompting
-    const authedUrl = repoUrl.replace(/^https:\/\//, `https://${token}@`);
+    const repoUrl = process.env.GITHUB_REPO_URL;
+    if (!repoUrl) return;
+
+    // Register the plain (non-authed) remote URL; credentials come via GIT_CONFIG_* at push time
+    const cleanUrl = repoUrl.replace(/^https:\/\/[^@]*@/, "https://");
     try {
-      git(["remote", "set-url", "incidents", authedUrl]);
+      git(["remote", "set-url", "incidents", cleanUrl]);
     } catch {
-      git(["remote", "add", "incidents", authedUrl]);
+      git(["remote", "add", "incidents", cleanUrl]);
     }
   } catch {
     // Non-fatal — push will fail gracefully later
@@ -110,31 +140,34 @@ function configureGit(): void {
 }
 
 function tryPush(): { pushed: boolean; push_error: string | null } {
+  const token = process.env.GITHUB_TOKEN;
+  const repoUrl = process.env.GITHUB_REPO_URL;
+  if (!token || !repoUrl) {
+    return { pushed: false, push_error: "GITHUB_TOKEN or GITHUB_REPO_URL not configured" };
+  }
+
+  const pushEnv = buildGitEnv(token);
+
+  let branch = "main";
   try {
-    const token = process.env.GITHUB_TOKEN;
-    const repoUrl = process.env.GITHUB_REPO_URL;
-    if (!token || !repoUrl) {
-      return { pushed: false, push_error: "GITHUB_TOKEN or GITHUB_REPO_URL not configured" };
-    }
+    branch =
+      execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        stdio: "pipe",
+        env: GIT_ENV_BASE,
+        timeout: 5_000,
+      })
+        .toString()
+        .trim() || "main";
+  } catch {
+    // default to main
+  }
 
-    let branch = "main";
-    try {
-      branch =
-        execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-          stdio: "pipe",
-          env: GIT_ENV,
-          timeout: 5_000,
-        })
-          .toString()
-          .trim() || "main";
-    } catch {
-      // default to main
-    }
-
-    git(["push", "incidents", branch], { timeout: 30_000 });
+  try {
+    git(["push", "incidents", branch], { timeout: 30_000, env: pushEnv });
     return { pushed: true, push_error: null };
   } catch (err) {
-    return { pushed: false, push_error: String(err instanceof Error ? err.message : err) };
+    const raw = err instanceof Error ? err.message : String(err);
+    return { pushed: false, push_error: redactGitError(raw) };
   }
 }
 
