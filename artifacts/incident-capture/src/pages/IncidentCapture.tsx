@@ -37,6 +37,7 @@ const formSchema = z.object({
   mechanism: z.string().min(1, "Mechanism description is required"),
   root_cause_option: z.string().min(1, "Root cause is required"),
   root_cause_other: z.string().optional(),
+  root_cause_notes: z.string().optional(),
   contra_present: z.array(z.string()).default([]),
   contra_absent: z.array(z.string()).default([]),
   intervention_tool: z.string().min(1, "Intervention tool is required"),
@@ -70,6 +71,7 @@ export default function IncidentCapture() {
       mechanism: "",
       root_cause_option: "",
       root_cause_other: "",
+      root_cause_notes: "",
       contra_present: [],
       contra_absent: [],
       intervention_tool: "",
@@ -90,9 +92,12 @@ export default function IncidentCapture() {
   function onSubmit(data: FormValues) {
     setSubmitResult(null);
 
-    const rootCause = data.root_cause_option === "Other (describe below)" 
+    const rootCauseBase = data.root_cause_option === "Other (describe below)"
       ? `Other: ${data.root_cause_other || "Not specified"}`
       : data.root_cause_option;
+    const rootCause = data.root_cause_notes
+      ? `${rootCauseBase}\n\nNotes: ${data.root_cause_notes}`
+      : rootCauseBase;
 
     const intervention = data.intervention_notes 
       ? `${data.intervention_tool} - ${data.intervention_notes}`
@@ -429,6 +434,25 @@ export default function IncidentCapture() {
                     )}
                   />
                 )}
+
+                <FormField
+                  control={form.control}
+                  name="root_cause_notes"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-xs text-muted-foreground">Notes</FormLabel>
+                      <FormControl>
+                        <Textarea
+                          placeholder="Additional observations, context, or diagnostic notes..."
+                          className="bg-card min-h-[80px] resize-y text-sm"
+                          data-testid="textarea-root-cause-notes"
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
               </div>
             </section>
 
