@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { randomUUID } from "crypto";
@@ -70,22 +70,39 @@ function buildMarkdown(id: string, data: Record<string, unknown>): string {
   ].join("\n");
 }
 
+/**
+ * Shared env for all git operations — disables any interactive credential prompts
+ * so git never hangs waiting for stdin.
+ */
+const GIT_ENV = {
+  ...process.env,
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_ASKPASS: "echo",
+} as NodeJS.ProcessEnv;
+
+function git(args: string[], opts?: { timeout?: number }): void {
+  execFileSync("git", args, {
+    stdio: "pipe",
+    env: GIT_ENV,
+    timeout: opts?.timeout ?? 10_000,
+  });
+}
+
 function configureGit(): void {
   try {
     const token = process.env.GITHUB_TOKEN;
     const repoUrl = process.env.GITHUB_REPO_URL;
     if (!token || !repoUrl) return;
 
-    // Set git identity
-    execSync('git config user.email "incident-capture@simonsvoss.local"', { stdio: "pipe" });
-    execSync('git config user.name "Incident Capture Bot"', { stdio: "pipe" });
+    git(["config", "user.email", "incident-capture@simonsvoss.local"]);
+    git(["config", "user.name", "Incident Capture Bot"]);
 
-    // Set authenticated remote (replace or add "incidents" remote)
-    const authedUrl = repoUrl.replace("https://", `https://${token}@`);
+    // Embed token in remote URL so git uses it without prompting
+    const authedUrl = repoUrl.replace(/^https:\/\//, `https://${token}@`);
     try {
-      execSync(`git remote set-url incidents "${authedUrl}"`, { stdio: "pipe" });
+      git(["remote", "set-url", "incidents", authedUrl]);
     } catch {
-      execSync(`git remote add incidents "${authedUrl}"`, { stdio: "pipe" });
+      git(["remote", "add", "incidents", authedUrl]);
     }
   } catch {
     // Non-fatal — push will fail gracefully later
@@ -100,15 +117,21 @@ function tryPush(): { pushed: boolean; push_error: string | null } {
       return { pushed: false, push_error: "GITHUB_TOKEN or GITHUB_REPO_URL not configured" };
     }
 
-    // Try to detect the default branch
     let branch = "main";
     try {
-      branch = execSync("git rev-parse --abbrev-ref HEAD", { stdio: "pipe" }).toString().trim() || "main";
+      branch =
+        execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+          stdio: "pipe",
+          env: GIT_ENV,
+          timeout: 5_000,
+        })
+          .toString()
+          .trim() || "main";
     } catch {
       // default to main
     }
 
-    execSync(`git push incidents ${branch}`, { stdio: "pipe" });
+    git(["push", "incidents", branch], { timeout: 30_000 });
     return { pushed: true, push_error: null };
   } catch (err) {
     return { pushed: false, push_error: String(err instanceof Error ? err.message : err) };
@@ -144,11 +167,11 @@ router.post("/incident", (req, res) => {
 
   writeFileSync(filePath, markdown, "utf8");
 
-  // Git commit
+  // Git commit — use argument arrays throughout, no shell interpolation of user data
   let pushResult: { pushed: boolean; push_error: string | null } = { pushed: false, push_error: null };
   try {
-    execSync(`git add "${filePath}"`, { stdio: "pipe" });
-    execSync(`git commit -m "incident: ${id} [${data.platform}]"`, { stdio: "pipe" });
+    git(["add", filePath]);
+    git(["commit", "-m", `incident: ${id} [${platformSlug}]`]);
     pushResult = tryPush();
   } catch (err) {
     pushResult = { pushed: false, push_error: String(err instanceof Error ? err.message : err) };
@@ -177,7 +200,6 @@ router.get("/incident/:id", (req, res) => {
     return;
   }
 
-  // Walk all platform dirs looking for the id
   let found: { content: string; filePath: string } | null = null;
   for (const platformDir of readdirSync(CASES_DIR)) {
     const fullPlatformDir = join(CASES_DIR, platformDir);
@@ -197,8 +219,7 @@ router.get("/incident/:id", (req, res) => {
     return;
   }
 
-  const parsed2 = parseMarkdown(found.content, found.filePath);
-  res.json(parsed2);
+  res.json(parseMarkdown(found.content, found.filePath));
 });
 
 // GET /search?q=
@@ -226,18 +247,17 @@ router.get("/search", (req, res) => {
       const fullPath = join(fullPlatformDir, file);
       const content = readFileSync(fullPath, "utf8");
       if (content.toLowerCase().includes(query)) {
-        const parsed3 = parseMarkdown(content, `cases/${platformDir}/${file}`);
-        // Build snippet: find the line with the match
+        const inc = parseMarkdown(content, `cases/${platformDir}/${file}`);
         const lines = content.split("\n");
         const matchLine = lines.find((l) => l.toLowerCase().includes(query)) ?? "";
         results.push({
-          id: parsed3.id,
-          platform: parsed3.platform,
-          file_path: parsed3.file_path,
-          created_at: parsed3.created_at,
-          confidence: parsed3.confidence,
-          system_layers_involved: parsed3.system_layers_involved,
-          tags: parsed3.tags,
+          id: inc.id,
+          platform: inc.platform,
+          file_path: inc.file_path,
+          created_at: inc.created_at,
+          confidence: inc.confidence,
+          system_layers_involved: inc.system_layers_involved,
+          tags: inc.tags,
           snippet: matchLine.trim().slice(0, 200),
         });
       }
@@ -247,21 +267,25 @@ router.get("/search", (req, res) => {
   res.json({ query: q, results, total: results.length });
 });
 
-// Helper: parse YAML frontmatter from markdown
+// ---------------------------------------------------------------------------
+// Markdown helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse YAML frontmatter + structured markdown body from a stored incident file.
+ */
 function parseMarkdown(content: string, filePath: string): Record<string, unknown> {
-  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
   const frontmatter: Record<string, unknown> = {};
 
-  if (match) {
-    const yamlLines = match[1].split("\n");
-    for (const line of yamlLines) {
+  if (fmMatch) {
+    for (const line of fmMatch[1].split("\n")) {
       const colonIdx = line.indexOf(":");
       if (colonIdx === -1) continue;
       const key = line.slice(0, colonIdx).trim();
       const rawVal = line.slice(colonIdx + 1).trim();
 
       if (rawVal.startsWith("[")) {
-        // Array value
         frontmatter[key] = rawVal
           .slice(1, -1)
           .split(",")
@@ -269,7 +293,7 @@ function parseMarkdown(content: string, filePath: string): Record<string, unknow
           .filter(Boolean);
       } else if (rawVal.startsWith('"')) {
         frontmatter[key] = rawVal.replace(/^"|"$/g, "");
-      } else if (!isNaN(Number(rawVal)) && rawVal !== "") {
+      } else if (rawVal !== "" && !isNaN(Number(rawVal))) {
         frontmatter[key] = Number(rawVal);
       } else {
         frontmatter[key] = rawVal;
@@ -289,30 +313,56 @@ function parseMarkdown(content: string, filePath: string): Record<string, unknow
     intervention: frontmatter.intervention ?? "",
     created_at: dateMatch ? dateMatch[1] : "",
     file_path: filePath,
-    // Body sections extracted from markdown
-    mechanism: extractSection(content, "Mechanism"),
-    symptoms: extractListSection(content, "Symptoms"),
-    root_cause: extractSection(content, "Root Cause"),
+    mechanism: extractH2Section(content, "Mechanism"),
+    symptoms: extractListFromH2(content, "Symptoms"),
+    root_cause: extractH2Section(content, "Root Cause"),
     contra_indicators: {
-      present: extractListSection(content, "Present"),
-      absent: extractListSection(content, "Absent"),
+      present: extractH3Section(content, "Present"),
+      absent: extractH3Section(content, "Absent"),
     },
   };
 }
 
-function extractSection(content: string, heading: string): string {
-  const regex = new RegExp(`## ${heading}\\n([\\s\\S]*?)(?=\\n## |$)`);
+/**
+ * Extract the text body of a level-2 heading section (## Heading).
+ * Stops at the next ## or ### or end of file.
+ */
+function extractH2Section(content: string, heading: string): string {
+  const regex = new RegExp(`(?:^|\\n)## ${escapeRegex(heading)}\\n([\\s\\S]*?)(?=\\n## |\\n### |$)`);
   const match = content.match(regex);
   return match ? match[1].trim() : "";
 }
 
-function extractListSection(content: string, heading: string): string[] {
-  const section = extractSection(content, heading);
+/**
+ * Extract bullet list items from a level-2 heading section.
+ */
+function extractListFromH2(content: string, heading: string): string[] {
+  const section = extractH2Section(content, heading);
   if (!section || section === "_none_") return [];
   return section
     .split("\n")
     .map((l) => l.replace(/^- /, "").trim())
     .filter(Boolean);
+}
+
+/**
+ * Extract the text body of a level-3 heading section (### Heading).
+ * Stops at the next ## or ### or end of file.
+ */
+function extractH3Section(content: string, heading: string): string[] {
+  const regex = new RegExp(`(?:^|\\n)### ${escapeRegex(heading)}\\n([\\s\\S]*?)(?=\\n## |\\n### |$)`);
+  const match = content.match(regex);
+  if (!match) return [];
+  const body = match[1].trim();
+  if (!body || body === "_none_") return [];
+  return body
+    .split("\n")
+    .map((l) => l.replace(/^- /, "").trim())
+    .filter(Boolean);
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export default router;
