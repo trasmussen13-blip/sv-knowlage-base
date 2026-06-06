@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: incidents
+    description: Incident management
 paths:
   /healthz:
     get:
@@ -24,6 +26,77 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /incident:
+    post:
+      operationId: createIncident
+      tags: [incidents]
+      summary: Submit a new incident
+      description: Validates the incident schema, writes a Markdown file, and commits + pushes to GitHub
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentInput"
+      responses:
+        "201":
+          description: Incident created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentResult"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /incident/{id}:
+    get:
+      operationId: getIncident
+      tags: [incidents]
+      summary: Retrieve a stored incident by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Incident found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /search:
+    get:
+      operationId: searchIncidents
+      tags: [incidents]
+      summary: Full-text search across stored incidents
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResults"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +107,191 @@ components:
       required:
         - status
 
+    ContraIndicators:
+      type: object
+      properties:
+        present:
+          type: array
+          items:
+            type: string
+          description: Indicators that rule out this failure mode
+        absent:
+          type: array
+          items:
+            type: string
+          description: Indicators whose absence strengthens likelihood
+      required:
+        - present
+        - absent
+
+    IncidentInput:
+      type: object
+      properties:
+        platform:
+          type: string
+          description: "Software platform: AXM | LSM | SmartIntego | Smart.Surveil | Smart.XChange | Other"
+        device_layer:
+          type: array
+          items:
+            type: string
+          description: Hardware components involved
+        symptoms:
+          type: array
+          items:
+            type: string
+          description: Observed user-visible errors or UI behavior
+        mechanism:
+          type: string
+          description: How the system fails internally (not user-visible)
+        root_cause:
+          type: string
+          description: Actual technical cause requiring a fix
+        contra_indicators:
+          $ref: "#/components/schemas/ContraIndicators"
+        system_layers_involved:
+          type: array
+          items:
+            type: string
+          description: "System layers: software | network | database | device | identity"
+        intervention:
+          type: string
+          description: Fix or tool applied to resolve the issue
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Confidence score 0-1
+        tags:
+          type: array
+          items:
+            type: string
+          description: Auto-tagged keywords
+      required:
+        - platform
+        - symptoms
+        - mechanism
+        - root_cause
+        - contra_indicators
+        - system_layers_involved
+        - intervention
+        - confidence
+
+    Incident:
+      type: object
+      properties:
+        id:
+          type: string
+        platform:
+          type: string
+        device_layer:
+          type: array
+          items:
+            type: string
+        symptoms:
+          type: array
+          items:
+            type: string
+        mechanism:
+          type: string
+        root_cause:
+          type: string
+        contra_indicators:
+          $ref: "#/components/schemas/ContraIndicators"
+        system_layers_involved:
+          type: array
+          items:
+            type: string
+        intervention:
+          type: string
+        confidence:
+          type: number
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+        file_path:
+          type: string
+      required:
+        - id
+        - platform
+        - symptoms
+        - mechanism
+        - root_cause
+        - contra_indicators
+        - system_layers_involved
+        - intervention
+        - confidence
+
+    IncidentResult:
+      type: object
+      properties:
+        id:
+          type: string
+        file_path:
+          type: string
+        pushed:
+          type: boolean
+          description: Whether the GitHub push succeeded
+        push_error:
+          type: ["string", "null"]
+          description: Push error message if push failed
+      required:
+        - id
+        - file_path
+        - pushed
+
+    SearchResult:
+      type: object
+      properties:
+        id:
+          type: string
+        platform:
+          type: string
+        file_path:
+          type: string
+        created_at:
+          type: string
+        confidence:
+          type: number
+        system_layers_involved:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        snippet:
+          type: string
+          description: Short excerpt from the matched content
+      required:
+        - id
+        - platform
+        - file_path
+        - confidence
+
+    SearchResults:
+      type: object
+      properties:
+        query:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+        total:
+          type: integer
+      required:
+        - query
+        - results
+        - total
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
