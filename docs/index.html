@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Support Capture</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div class="container">
+
+    <h1>Incident Capture</h1>
+
+    <!-- Platform -->
+    <label>Platform</label>
+    <select id="platform">
+      <option value="AXM">AXM</option>
+      <option value="LSM">LSM</option>
+      <option value="SmartIntego">SmartIntego</option>
+      <option value="Other">Other</option>
+    </select>
+
+    <!-- Symptoms -->
+    <label>Symptoms</label>
+    <textarea id="symptoms" placeholder="One per line..."></textarea>
+
+    <!-- Mechanism -->
+    <label>Mechanism</label>
+    <textarea id="mechanism" placeholder="What is failing internally?" required></textarea>
+
+    <!-- Root Cause -->
+    <label>Root Cause</label>
+    <textarea id="rootCause" placeholder="Underlying technical cause"></textarea>
+
+    <!-- Contra Indicators -->
+    <label>Contra Indicators (present)</label>
+    <textarea id="contraPresent" placeholder="What is true here that rules this OUT?"></textarea>
+
+    <label>Contra Indicators (absent)</label>
+    <textarea id="contraAbsent" placeholder="What is missing that would normally be present?"></textarea>
+
+    <!-- Intervention -->
+    <label>Intervention</label>
+    <textarea id="intervention" placeholder="Fix applied / tool used"></textarea>
+
+    <!-- Submit -->
+    <button onclick="submitIncident()">Save Incident</button>
+
+    <p id="status"></p>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
