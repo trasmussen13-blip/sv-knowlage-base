@@ -5,6 +5,7 @@ import { join, resolve } from "path";
 import { randomUUID } from "crypto";
 import { readdirSync, statSync } from "fs";
 import { CreateIncidentBody, GetIncidentParams, SearchIncidentsQueryParams } from "@workspace/api-zod";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -106,8 +107,11 @@ function redactGitError(raw: string): string {
     .slice(0, 300);
 }
 
+// Absolute path to the repo root — git must run here, not from the API server's cwd
+const REPO_ROOT = resolve(process.cwd(), "..", "..");
+
 function git(args: string[], opts?: { timeout?: number; env?: NodeJS.ProcessEnv }): void {
-  execFileSync("git", args, {
+  execFileSync("git", ["-C", REPO_ROOT, ...args], {
     stdio: "pipe",
     env: opts?.env ?? GIT_ENV_BASE,
     timeout: opts?.timeout ?? 10_000,
@@ -147,7 +151,7 @@ function tryPush(): { pushed: boolean; push_error: string | null } {
   let branch = "main";
   try {
     branch =
-      execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "--abbrev-ref", "HEAD"], {
         stdio: "pipe",
         env: GIT_ENV_BASE,
         timeout: 5_000,
@@ -159,7 +163,18 @@ function tryPush(): { pushed: boolean; push_error: string | null } {
   }
 
   try {
-    // Push directly to the authed URL — token never stored in remote config
+    // Fetch + merge remote changes before pushing.
+    // Incident files are always unique UUIDs so there are never real conflicts.
+    // We use "ours" strategy only for non-incident files (e.g. README).
+    try {
+      git(["fetch", pushUrl, `${branch}:refs/remotes/incidents/main`], { timeout: 20_000 });
+      git(
+        ["merge", "--no-edit", "--allow-unrelated-histories", "--strategy-option=theirs", "refs/remotes/incidents/main"],
+        { timeout: 10_000 }
+      );
+    } catch (mergeErr) {
+      logger.warn({ err: mergeErr }, "git merge before push failed — attempting push anyway");
+    }
     git(["push", pushUrl, branch], { timeout: 30_000 });
     return { pushed: true, push_error: null };
   } catch (err) {
