@@ -82,18 +82,14 @@ const GIT_ENV_BASE = {
 } as NodeJS.ProcessEnv;
 
 /**
- * Build a git env that injects credentials via git's http.extraHeader config.
- * This is the GitHub-recommended approach: the token never appears in any URL,
- * so raw git error output cannot leak it.
+ * Build an authenticated HTTPS push URL by embedding the token.
+ * The token only exists in memory at push time — it is never written to
+ * the remote config. redactGitError() scrubs it from any error output
+ * before the string reaches an API response.
  */
-function buildGitEnv(token: string): NodeJS.ProcessEnv {
-  const b64 = Buffer.from(`x-access-token:${token}`).toString("base64");
-  return {
-    ...GIT_ENV_BASE,
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "http.extraHeader",
-    GIT_CONFIG_VALUE_0: `Authorization: Basic ${b64}`,
-  } as NodeJS.ProcessEnv;
+function buildPushUrl(repoUrl: string, token: string): string {
+  const clean = repoUrl.replace(/^https:\/\/[^@]*@/, "https://");
+  return clean.replace(/^https:\/\//, `https://x-access-token:${token}@`);
 }
 
 /**
@@ -146,7 +142,7 @@ function tryPush(): { pushed: boolean; push_error: string | null } {
     return { pushed: false, push_error: "GITHUB_TOKEN or GITHUB_REPO_URL not configured" };
   }
 
-  const pushEnv = buildGitEnv(token);
+  const pushUrl = buildPushUrl(repoUrl, token);
 
   let branch = "main";
   try {
@@ -163,7 +159,8 @@ function tryPush(): { pushed: boolean; push_error: string | null } {
   }
 
   try {
-    git(["push", "incidents", branch], { timeout: 30_000, env: pushEnv });
+    // Push directly to the authed URL — token never stored in remote config
+    git(["push", pushUrl, branch], { timeout: 30_000 });
     return { pushed: true, push_error: null };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
